@@ -593,26 +593,19 @@ app.delete('/api/admin/delete-doctor/:id', authenticate, requireDB, async (req, 
 //  SERVER START + ADMIN SEED
 // ═════════════════════════════════════════════════════════════════════════════
 const PORT = process.env.PORT || 3000;
-
-// For Vercel serverless deployment
-if (process.env.VERCEL) {
-    module.exports = app;
-} else {
-    app.listen(PORT, async () => {
-        console.log(`Server running on port ${PORT}`);
-        if (!db) return;
-        try {
-            const adminSnap = await db.collection('users').where('email', '==', 'admin@gmail.com').limit(1).get();
-            if (adminSnap.empty) {
-                await db.collection('users').add({
-                    name: 'Admin', email: 'admin@gmail.com', role: 'admin',
-                    created_at: admin.firestore.FieldValue.serverTimestamp(),
-                });
+app.listen(PORT, async () => {
+    console.log(`Server running on port ${PORT}`);
+    if (!db) return;
+    try {
+        const adminSnap = await db.collection('users').where('email', '==', 'admin@gmail.com').limit(1).get();
+        if (adminSnap.empty) {
+            await db.collection('users').add({
+                name: 'Admin', email: 'admin@gmail.com', role: 'admin',
+                created_at: admin.firestore.FieldValue.serverTimestamp(),
+            });
             console.log('[Firebase] Seeded admin account: admin@gmail.com');
         }
     } catch (e) {
         console.error('[Firebase] Failed to seed admin:', e.message);
     }
 });
-
-module.exports = app;
