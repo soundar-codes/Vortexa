@@ -70,6 +70,22 @@ app.use((req, res, next) => {
   next();
 });
 
+// Health check endpoint (no Firebase required)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', message: 'Server is running', timestamp: new Date().toISOString() });
+});
+
+// Test environment variables endpoint
+app.get('/test-env', (req, res) => {
+  res.json({
+    hasProjectId: !!process.env.FIREBASE_PROJECT_ID,
+    hasClientEmail: !!process.env.FIREBASE_CLIENT_EMAIL,
+    hasPrivateKey: !!process.env.FIREBASE_PRIVATE_KEY,
+    hasJwtSecret: !!process.env.JWT_SECRET,
+    projectId: process.env.FIREBASE_PROJECT_ID ? '***' + process.env.FIREBASE_PROJECT_ID.slice(-4) : 'missing'
+  });
+});
+
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_medguardian_key';
 
 // ─── JWT Middleware ───────────────────────────────────────────────────────────
