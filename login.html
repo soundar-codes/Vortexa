@@ -3,6 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <title>MedGuardian AI — Secure Login</title>
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-analytics.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDkq8RsuvoYPw2Vh3vuokWexG2l6A86ztw",
+    authDomain: "medguardian-92fde.firebaseapp.com",
+    projectId: "medguardian-92fde",
+    storageBucket: "medguardian-92fde.firebasestorage.app",
+    messagingSenderId: "659677873002",
+    appId: "1:659677873002:web:ff6bea29553fc332525b13",
+    measurementId: "G-4JHQSY0PCY"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const analytics = getAnalytics(app);
+</script>
 <style>
   :root{
     --navy:#0B2545;
@@ -133,7 +151,7 @@
 </div>
 
 <script>
-  const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:3000/api' : window.location.origin + '/api';
+  const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:3000/api' : 'https://vertexa-sigma.vercel.app/api';
 
   function clearMessages() {
       document.getElementById('error-msg').innerText = '';
