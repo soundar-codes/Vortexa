@@ -62,7 +62,15 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
-app.use(express.static(__dirname));
+
+// Serve static files only for non-API routes
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api')) {
+    next();
+  } else {
+    express.static(__dirname)(req, res, next);
+  }
+});
 
 // Debug logging
 app.use((req, res, next) => {
