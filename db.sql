@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(255) NOT NULL,
     role ENUM('patient', 'doctor') NOT NULL,
     hospital VARCHAR(255) DEFAULT NULL,
+    phone VARCHAR(20) DEFAULT NULL,
+    userid VARCHAR(50) UNIQUE DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
