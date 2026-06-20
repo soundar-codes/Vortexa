@@ -1,6 +1,4 @@
 const express = require('express');
-const mysql = require('mysql2/promise');
-const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 require('dotenv').config();
@@ -9,56 +7,66 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const admin = require('firebase-admin');
 
-// On Vercel, the filesystem is read-only. Only create the uploads dir locally.
-const IS_VERCEL = process.env.VERCEL === '1';
-const uploadDir = path.join(__dirname, 'uploads');
-if (!IS_VERCEL) {
-    try {
-        if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
-        }
-    } catch (e) {
-        console.warn('Could not create uploads directory:', e.message);
+// ─── Firebase Initialization ──────────────────────────────────────────────────
+let db = null;
+try {
+    let credential;
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        // Option A: paste the entire service account JSON as one env var
+        const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+        credential = admin.credential.cert(sa);
+    } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+        // Option B: individual env vars (easier for Railway)
+        credential = admin.credential.cert({
+            projectId: process.env.FIREBASE_PROJECT_ID,
+            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+            privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        });
+    } else {
+        throw new Error(
+            'Firebase credentials missing. Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY in Railway.'
+        );
     }
+    admin.initializeApp({ credential });
+    db = admin.firestore();
+    console.log('[Firebase] Connected to Firestore successfully.');
+} catch (err) {
+    console.error('[Firebase] Initialization failed:', err.message);
 }
 
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, uploadDir)
-    },
-    filename: function (req, file, cb) {
-        cb(null, Date.now() + '-' + file.originalname)
-    }
-});
-const upload = multer({ storage: storage });
+// Middleware: reject requests when DB is not ready
+function requireDB(req, res, next) {
+    if (!db) return res.status(503).json({ error: 'Database not configured. Set Firebase env vars in Railway.' });
+    next();
+}
 
+// ─── File Upload Setup ────────────────────────────────────────────────────────
+const uploadDir = path.join(__dirname, 'uploads');
+try {
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+} catch (e) {
+    console.warn('Could not create uploads directory:', e.message);
+}
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadDir),
+    filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname),
+});
+const upload = multer({ storage });
+
+// ─── Express Setup ────────────────────────────────────────────────────────────
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(__dirname)); // Serve frontend files from root directory
+app.use(express.static(__dirname));
 
-const JWT_SECRET = 'supersecret_medguardian_key';
+const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_medguardian_key';
 
-// Initialize MySQL pool using environment variables.
-// Set DB_HOST, DB_USER, DB_PASSWORD, DB_NAME in your Vercel project settings.
-const pool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'medguardian_db',
-    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 3306,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined
-});
-
-// Middleware to verify JWT
+// ─── JWT Middleware ───────────────────────────────────────────────────────────
 const authenticate = (req, res, next) => {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
-
     jwt.verify(token, JWT_SECRET, (err, decoded) => {
         if (err) return res.status(401).json({ error: 'Invalid token' });
         req.user = decoded;
@@ -66,119 +74,86 @@ const authenticate = (req, res, next) => {
     });
 };
 
-// Helper to send real SMS (using Fast2SMS or Twilio) or fallback to simulated log
+// ─── SMS Helper ───────────────────────────────────────────────────────────────
 async function sendSMS(phone, message) {
-    // 1. Try Fast2SMS if API key is provided
     if (process.env.FAST2SMS_API_KEY) {
         try {
-            console.log(`[Fast2SMS] Attempting to send SMS to ${phone}...`);
-            // Fast2SMS expects 10-digit numbers, so clean any spaces/dashes/prefixes
             const cleanedPhone = phone.replace(/\D/g, '').slice(-10);
-            
             const response = await fetch('https://www.fast2sms.com/dev/bulkV2', {
                 method: 'POST',
-                headers: {
-                    'authorization': process.env.FAST2SMS_API_KEY,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    route: 'q',
-                    message: message,
-                    language: 'english',
-                    flash: 0,
-                    numbers: cleanedPhone
-                })
+                headers: { 'authorization': process.env.FAST2SMS_API_KEY, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ route: 'q', message, language: 'english', flash: 0, numbers: cleanedPhone }),
             });
             const data = await response.json();
             if (response.ok && data.return === true) {
-                console.log(`[Fast2SMS] SMS successfully sent to ${phone}: ${data.message}`);
+                console.log(`[Fast2SMS] SMS sent to ${phone}`);
                 return { success: true, provider: 'fast2sms' };
-            } else {
-                console.error(`[Fast2SMS] API responded with error:`, data);
             }
         } catch (err) {
-            console.error('[Fast2SMS] Error sending SMS:', err.message);
+            console.error('[Fast2SMS] Error:', err.message);
         }
     }
-    
-    // 2. Try Twilio if SID, TOKEN, and FROM are provided
-    if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER) {
-        try {
-            console.log(`[Twilio] Attempting to send SMS to ${phone}...`);
-            // Ensure phone number has country code (Twilio requires E.164, e.g., +919876543210)
-            let formattedPhone = phone.trim().replace(/[\s-()]/g, '');
-            if (!formattedPhone.startsWith('+')) {
-                // If it is 10 digits, default to India (+91)
-                if (formattedPhone.length === 10) {
-                    formattedPhone = '+91' + formattedPhone;
-                } else {
-                    formattedPhone = '+' + formattedPhone;
-                }
-            }
-            
-            const authString = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
-            const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Basic ${authString}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: new URLSearchParams({
-                    To: formattedPhone,
-                    From: process.env.TWILIO_FROM_NUMBER,
-                    Body: message
-                })
-            });
-            const data = await response.json();
-            if (response.ok) {
-                console.log(`[Twilio] SMS successfully sent to ${formattedPhone}. SID: ${data.sid}`);
-                return { success: true, provider: 'twilio' };
-            } else {
-                console.error(`[Twilio] API responded with error:`, data);
-            }
-        } catch (err) {
-            console.error('[Twilio] Error sending SMS:', err.message);
-        }
-    }
-    
-    // 3. Fallback to Simulated SMS (No keys configured or sending failed)
     console.log(`[SIMULATED SMS to ${phone}]: ${message}`);
     return { success: false, provider: 'simulation' };
 }
-// --- PUBLIC EMERGENCY ROUTE ---
-app.get('/api/emergency/:userid', async (req, res) => {
+
+// ─── Audit Log Helper ─────────────────────────────────────────────────────────
+async function logAudit(userId, action, ip, deviceInfo) {
+    if (!db) return;
     try {
-        const userid = req.params.userid;
-        if (!userid) {
-            return res.status(400).json({ error: 'UserID is required' });
+        await db.collection('audit_logs').add({
+            user_id: userId || null,
+            action,
+            ip_address: ip || '',
+            device_info: deviceInfo || '',
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+        });
+    } catch (e) {
+        console.error('Audit log failed:', e.message);
+    }
+}
+
+// ─── Helper: convert Firestore timestamps in a doc ───────────────────────────
+function serializeDoc(id, data) {
+    const obj = { id, ...data };
+    for (const key of Object.keys(obj)) {
+        if (obj[key] && typeof obj[key].toDate === 'function') {
+            obj[key] = obj[key].toDate().toISOString();
         }
+    }
+    return obj;
+}
 
-        // 1. Fetch patient details
-        const [users] = await pool.query(
-            'SELECT id, name, phone, email, hospital FROM users WHERE userid = ? AND role = "patient"',
-            [userid]
-        );
-        if (users.length === 0) {
-            return res.status(404).json({ error: 'Patient profile not found' });
-        }
-        const patient = users[0];
+// ═════════════════════════════════════════════════════════════════════════════
+//  ROUTES
+// ═════════════════════════════════════════════════════════════════════════════
 
-        // 2. Fetch allergies and prescriptions from health_records
-        const [records] = await pool.query(
-            'SELECT record_type, title, description FROM health_records WHERE patient_id = ? AND record_type IN ("allergy", "prescription") ORDER BY id ASC',
-            [patient.id]
-        );
+// ─── PUBLIC: Emergency info ───────────────────────────────────────────────────
+app.get('/api/emergency/:userid', requireDB, async (req, res) => {
+    try {
+        const { userid } = req.params;
+        const snap = await db.collection('users')
+            .where('userid', '==', userid)
+            .where('role', '==', 'patient')
+            .limit(1).get();
+        if (snap.empty) return res.status(404).json({ error: 'Patient profile not found' });
+        const patient = serializeDoc(snap.docs[0].id, snap.docs[0].data());
 
-        const allergies = records.filter(r => r.record_type === 'allergy');
-        const prescriptions = records.filter(r => r.record_type === 'prescription');
+        const recordsSnap = await db.collection('health_records')
+            .where('patient_id', '==', patient.id)
+            .where('record_type', 'in', ['allergy', 'prescription'])
+            .get();
+        const records = recordsSnap.docs.map(d => d.data());
 
         res.json({
             name: patient.name,
             phone: patient.phone,
             email: patient.email,
             hospital: patient.hospital,
-            allergies: allergies.map(r => ({ title: r.title, description: r.description })),
-            prescriptions: prescriptions.map(r => ({ title: r.title, description: r.description }))
+            allergies: records.filter(r => r.record_type === 'allergy')
+                .map(r => ({ title: r.title, description: r.description })),
+            prescriptions: records.filter(r => r.record_type === 'prescription')
+                .map(r => ({ title: r.title, description: r.description })),
         });
     } catch (err) {
         console.error(err);
@@ -186,101 +161,67 @@ app.get('/api/emergency/:userid', async (req, res) => {
     }
 });
 
-// --- CRYPTO AUTH ROUTES (PASSWORDLESS) ---
-
-// Helper function for Audit Logging
-async function logAudit(userId, action, ip, deviceInfo) {
+// ─── CRYPTO AUTH: Device Registration ────────────────────────────────────────
+app.post('/api/auth/crypto/:role/register', requireDB, async (req, res) => {
     try {
-        await pool.query(
-            'INSERT INTO audit_logs (user_id, action, ip_address, device_info) VALUES (?, ?, ?, ?)',
-            [userId, action, ip, deviceInfo]
-        );
-    } catch (e) {
-        console.error('Audit log failed:', e);
-    }
-}
-
-// 1. Device Registration Flow (Setup)
-app.post('/api/auth/crypto/:role/register', async (req, res) => {
-    try {
-        const role = req.params.role;
+        const { role } = req.params;
         const { email, publicKey, deviceName } = req.body;
-        if (!email || !publicKey) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
-        if (role !== 'doctor' && role !== 'admin') {
-            return res.status(400).json({ error: 'Invalid role for cryptographic registration' });
-        }
+        if (!email || !publicKey) return res.status(400).json({ error: 'Missing required fields' });
+        if (role !== 'doctor' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
 
-        const connection = await pool.getConnection();
-        await connection.beginTransaction();
+        const userSnap = await db.collection('users')
+            .where('email', '==', email).where('role', '==', role).limit(1).get();
+        if (userSnap.empty) return res.status(404).json({ error: 'Account not found. Please contact an administrator.' });
+        const userId = userSnap.docs[0].id;
 
-        try {
-            // Find existing user (created by Admin)
-            const [users] = await connection.query('SELECT id FROM users WHERE email = ? AND role = ?', [email, role]);
-            if (users.length === 0) {
-                 await connection.rollback();
-                 return res.status(404).json({ error: 'Account not found. Please contact an administrator.' });
-            }
-            const userId = users[0].id;
+        const existingKeys = await db.collection('user_crypto_credentials')
+            .where('user_id', '==', userId).where('is_active', '==', true).limit(1).get();
+        if (!existingKeys.empty) return res.status(403).json({ error: 'A device is already registered for this account.' });
 
-            // Ensure no existing active keys
-            const [existingKeys] = await connection.query('SELECT id FROM user_crypto_credentials WHERE user_id = ? AND is_active = TRUE', [userId]);
-            if (existingKeys.length > 0) {
-                 await connection.rollback();
-                 return res.status(403).json({ error: 'A device is already registered for this account.' });
-            }
-
-            // Store public key
-            await connection.query(
-                'INSERT INTO user_crypto_credentials (user_id, role, public_key, key_algorithm, device_name) VALUES (?, ?, ?, ?, ?)',
-                [userId, role, publicKey, 'ECDSA', deviceName || 'Unknown Browser']
-            );
-
-            await connection.commit();
-            await logAudit(userId, 'Device Registration', req.ip, req.headers['user-agent']);
-
-            res.status(201).json({ message: 'Device securely registered.', id: userId });
-        } catch (err) {
-            await connection.rollback();
-            throw err;
-        } finally {
-            connection.release();
-        }
+        await db.collection('user_crypto_credentials').add({
+            user_id: userId, role,
+            public_key: publicKey,
+            key_algorithm: 'ECDSA',
+            device_name: deviceName || 'Unknown Browser',
+            is_active: true,
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+            last_used_at: null,
+        });
+        await logAudit(userId, 'Device Registration', req.ip, req.headers['user-agent']);
+        res.status(201).json({ message: 'Device securely registered.', id: userId });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
-// 2. Request Challenge (Login Step 1)
-app.post('/api/auth/crypto/:role/challenge', async (req, res) => {
+// ─── CRYPTO AUTH: Request Challenge ──────────────────────────────────────────
+app.post('/api/auth/crypto/:role/challenge', requireDB, async (req, res) => {
     try {
-        const role = req.params.role;
+        const { role } = req.params;
         const { email } = req.body;
         if (!email) return res.status(400).json({ error: 'Email required' });
-
         if (role !== 'doctor' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
 
-        const [users] = await pool.query('SELECT id, role FROM users WHERE email = ? AND role = ?', [email, role]);
-        if (users.length === 0) return res.status(404).json({ error: 'Account not found. Please contact an administrator.' });
-        const user = users[0];
+        const userSnap = await db.collection('users')
+            .where('email', '==', email).where('role', '==', role).limit(1).get();
+        if (userSnap.empty) return res.status(404).json({ error: 'Account not found. Please contact an administrator.' });
+        const userId = userSnap.docs[0].id;
 
-        // CHECK IF DEVICE SETUP IS REQUIRED
-        const [creds] = await pool.query('SELECT id FROM user_crypto_credentials WHERE user_id = ? AND is_active = TRUE', [user.id]);
-        if (creds.length === 0) {
+        const credsSnap = await db.collection('user_crypto_credentials')
+            .where('user_id', '==', userId).where('is_active', '==', true).limit(1).get();
+        if (credsSnap.empty) {
             return res.status(403).json({ error: 'Device not registered. Setting up secure key...', requiresSetup: true });
         }
 
-        // Generate 32-byte cryptographically secure random nonce
         const nonce = crypto.randomBytes(32).toString('base64');
-        const expiresAt = new Date(Date.now() + 60 * 1000); // 60 seconds expiry
-
-        await pool.query(
-            'INSERT INTO auth_challenges (user_id, challenge_nonce, expires_at) VALUES (?, ?, ?)',
-            [user.id, nonce, expiresAt]
-        );
-
+        const expiresAt = admin.firestore.Timestamp.fromDate(new Date(Date.now() + 60 * 1000));
+        await db.collection('auth_challenges').add({
+            user_id: userId,
+            challenge_nonce: nonce,
+            expires_at: expiresAt,
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+        });
         res.json({ challenge: nonce });
     } catch (err) {
         console.error(err);
@@ -288,123 +229,124 @@ app.post('/api/auth/crypto/:role/challenge', async (req, res) => {
     }
 });
 
-// 3. Verify Signature (Login Step 2)
-app.post('/api/auth/crypto/:role/verify', async (req, res) => {
+// ─── CRYPTO AUTH: Verify Signature ───────────────────────────────────────────
+app.post('/api/auth/crypto/:role/verify', requireDB, async (req, res) => {
     try {
-        const role = req.params.role;
+        const { role } = req.params;
         const { email, signature, clientDataJSON } = req.body;
         if (!email || !signature || !clientDataJSON) return res.status(400).json({ error: 'Missing required fields' });
-
         if (role !== 'doctor' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
 
-        // Parse clientDataJSON to get the challenge
         let clientData;
-        try {
-            clientData = JSON.parse(Buffer.from(clientDataJSON, 'base64').toString('utf8'));
-        } catch (e) {
-            return res.status(400).json({ error: 'Invalid clientDataJSON' });
-        }
+        try { clientData = JSON.parse(Buffer.from(clientDataJSON, 'base64').toString('utf8')); }
+        catch (e) { return res.status(400).json({ error: 'Invalid clientDataJSON' }); }
         const returnedChallenge = clientData.challenge;
 
-        // Fetch User
-        const [users] = await pool.query('SELECT id, name, role, email FROM users WHERE email = ? AND role = ?', [email, role]);
-        if (users.length === 0) return res.status(404).json({ error: 'User not found' });
-        const user = users[0];
+        const userSnap = await db.collection('users')
+            .where('email', '==', email).where('role', '==', role).limit(1).get();
+        if (userSnap.empty) return res.status(404).json({ error: 'User not found' });
+        const user = serializeDoc(userSnap.docs[0].id, userSnap.docs[0].data());
 
-        // Fetch valid challenge (replay protection & expiry check)
-        const [challenges] = await pool.query(
-            'SELECT id FROM auth_challenges WHERE user_id = ? AND challenge_nonce = ? AND expires_at > NOW()',
-            [user.id, returnedChallenge]
-        );
-        if (challenges.length === 0) {
+        // Validate challenge (find + check expiry)
+        const challengeSnap = await db.collection('auth_challenges')
+            .where('user_id', '==', user.id)
+            .where('challenge_nonce', '==', returnedChallenge)
+            .limit(1).get();
+        if (challengeSnap.empty || challengeSnap.docs[0].data().expires_at.toDate() < new Date()) {
             await logAudit(user.id, 'Login Failure - Expired/Invalid Challenge', req.ip, req.headers['user-agent']);
             return res.status(401).json({ error: 'Invalid or expired challenge' });
         }
+        // Delete challenge (one-time use)
+        await db.collection('auth_challenges').doc(challengeSnap.docs[0].id).delete();
 
-        // Delete challenge so it can't be reused (One-time use)
-        await pool.query('DELETE FROM auth_challenges WHERE id = ?', [challenges[0].id]);
-
-        // Fetch Public Key
-        const [creds] = await pool.query('SELECT public_key, id FROM user_crypto_credentials WHERE user_id = ? AND is_active = TRUE', [user.id]);
-        if (creds.length === 0) {
+        // Get public key
+        const credsSnap = await db.collection('user_crypto_credentials')
+            .where('user_id', '==', user.id).where('is_active', '==', true).limit(1).get();
+        if (credsSnap.empty) {
             await logAudit(user.id, 'Login Failure - No Active Device', req.ip, req.headers['user-agent']);
             return res.status(401).json({ error: 'No registered cryptographic identity found on this device.' });
         }
+        const publicKeyPem = credsSnap.docs[0].data().public_key;
 
-        const publicKeyPem = creds[0].public_key;
-
-        // Verify Signature using ieee-p1363 format (Web Crypto default for ECDSA)
+        // Verify ECDSA signature
         const isValid = crypto.verify(
             'SHA256',
             Buffer.from(clientDataJSON, 'base64'),
             { key: publicKeyPem, dsaEncoding: 'ieee-p1363' },
             Buffer.from(signature, 'base64')
         );
-
         if (!isValid) {
             await logAudit(user.id, 'Login Failure - Invalid Signature', req.ip, req.headers['user-agent']);
             return res.status(401).json({ error: 'Invalid cryptographic signature' });
         }
 
-        // Update last used
-        await pool.query('UPDATE user_crypto_credentials SET last_used_at = NOW() WHERE id = ?', [creds[0].id]);
+        await db.collection('user_crypto_credentials').doc(credsSnap.docs[0].id)
+            .update({ last_used_at: admin.firestore.FieldValue.serverTimestamp() });
         await logAudit(user.id, 'Login Success', req.ip, req.headers['user-agent']);
 
-        // Issue JWT
         const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ message: 'Cryptographic authentication successful.', token, user: { id: user.id, name: user.name, role: user.role, email: user.email } });
-
+        res.json({
+            message: 'Cryptographic authentication successful.',
+            token,
+            user: { id: user.id, name: user.name, role: user.role, email: user.email },
+        });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
-// Patient Login (unchanged)
-app.post('/api/auth/login', async (req, res) => {
+// ─── Patient Login ────────────────────────────────────────────────────────────
+app.post('/api/auth/login', requireDB, async (req, res) => {
     try {
         const { userid } = req.body;
         if (!userid) return res.status(400).json({ error: 'UserID required' });
-
-        const [rows] = await pool.query('SELECT * FROM users WHERE userid = ? AND role = "patient"', [userid]);
-        if (rows.length === 0) return res.status(401).json({ error: 'Invalid UserID' });
-        
-        const user = rows[0];
+        const snap = await db.collection('users')
+            .where('userid', '==', userid).where('role', '==', 'patient').limit(1).get();
+        if (snap.empty) return res.status(401).json({ error: 'Invalid UserID' });
+        const user = serializeDoc(snap.docs[0].id, snap.docs[0].data());
         const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
-        return res.json({ token, user: { id: user.id, name: user.name, role: user.role, email: user.email, userid: user.userid } });
+        res.json({ token, user: { id: user.id, name: user.name, role: user.role, email: user.email, userid: user.userid } });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
-// --- DOCTOR ROUTES ---
-app.get('/api/users/patients', authenticate, async (req, res) => {
+// ─── DOCTOR: Get all patients ─────────────────────────────────────────────────
+app.get('/api/users/patients', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'doctor') return res.status(403).json({ error: 'Doctors only' });
     try {
-        const [patients] = await pool.query(`
-            SELECT u.id, u.name, u.email, u.hospital, ar.status 
-            FROM users u 
-            LEFT JOIN access_requests ar ON u.id = ar.patient_id AND ar.doctor_id = ?
-            WHERE u.role = "patient"
-            ORDER BY COALESCE(u.hospital, 'zzz'), u.name
-        `, [req.user.id]);
+        const [patientsSnap, accessSnap] = await Promise.all([
+            db.collection('users').where('role', '==', 'patient').get(),
+            db.collection('access_requests').where('doctor_id', '==', req.user.id).get(),
+        ]);
+        const accessMap = {};
+        accessSnap.docs.forEach(d => { accessMap[d.data().patient_id] = d.data().status; });
+        const patients = patientsSnap.docs.map(d => ({
+            ...serializeDoc(d.id, d.data()),
+            status: accessMap[d.id] || null,
+        }));
+        patients.sort((a, b) => (a.hospital || 'zzz').localeCompare(b.hospital || 'zzz') || a.name.localeCompare(b.name));
         res.json(patients);
     } catch (err) {
         res.status(500).json({ error: 'Server error' });
     }
 });
 
-app.post('/api/access/request', authenticate, async (req, res) => {
+// ─── DOCTOR: Request access to patient ───────────────────────────────────────
+app.post('/api/access/request', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'doctor') return res.status(403).json({ error: 'Doctors only' });
     try {
         const { patient_id } = req.body;
-        await pool.query(
-            `INSERT INTO access_requests (doctor_id, patient_id, status, created_at) 
-             VALUES (?, ?, "pending", CURRENT_TIMESTAMP) 
-             ON DUPLICATE KEY UPDATE status = "pending", created_at = CURRENT_TIMESTAMP`,
-            [req.user.id, patient_id]
-        );
+        // Use composite ID to enforce uniqueness (doctor_patient pair)
+        const docId = `${req.user.id}_${patient_id}`;
+        await db.collection('access_requests').doc(docId).set({
+            doctor_id: req.user.id,
+            patient_id,
+            status: 'pending',
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+        });
         res.status(201).json({ message: 'Request sent successfully' });
     } catch (err) {
         console.error(err);
@@ -412,89 +354,71 @@ app.post('/api/access/request', authenticate, async (req, res) => {
     }
 });
 
-// --- DOCTOR ROUTES --- (continued)
-app.post('/api/doctor/create-patient', authenticate, async (req, res) => {
+// ─── DOCTOR: Create patient ───────────────────────────────────────────────────
+app.post('/api/doctor/create-patient', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'doctor') return res.status(403).json({ error: 'Doctors only' });
     try {
         const { name, email, phone, userid, hospital, prescriptionTitle, prescriptionDesc, healthIssueTitle, healthIssueDesc } = req.body;
-        if (!name || !email || !phone || !userid) {
-            return res.status(400).json({ error: 'Name, email, phone, and UserID are required' });
+        if (!name || !email || !phone || !userid) return res.status(400).json({ error: 'Name, email, phone, and UserID are required' });
+
+        // Uniqueness checks
+        const [emailCheck, useridCheck] = await Promise.all([
+            db.collection('users').where('email', '==', email).limit(1).get(),
+            db.collection('users').where('userid', '==', userid).limit(1).get(),
+        ]);
+        if (!emailCheck.empty) return res.status(400).json({ error: 'Email already exists' });
+        if (!useridCheck.empty) return res.status(400).json({ error: 'UserID already exists' });
+
+        // Batch write: create patient + access + optional records
+        const batch = db.batch();
+        const patientRef = db.collection('users').doc();
+        batch.set(patientRef, {
+            name, email, role: 'patient',
+            hospital: hospital || null, phone, userid,
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        // Auto-approve access for the creating doctor
+        const accessRef = db.collection('access_requests').doc(`${req.user.id}_${patientRef.id}`);
+        batch.set(accessRef, {
+            doctor_id: req.user.id, patient_id: patientRef.id, status: 'approved',
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        if (prescriptionTitle && prescriptionDesc) {
+            const rxRef = db.collection('health_records').doc();
+            batch.set(rxRef, { patient_id: patientRef.id, record_type: 'prescription', title: prescriptionTitle, description: prescriptionDesc, created_at: admin.firestore.FieldValue.serverTimestamp() });
         }
-        
-        // Patients no longer have passwords, use dummy hash
-        const hashedPassword = '*NO_PASSWORD*';
-        
-        // Use a transaction since we are inserting multiple records
-        const connection = await pool.getConnection();
-        await connection.beginTransaction();
-
-        try {
-            // 1. Create Patient User
-            const [userResult] = await connection.query(
-                'INSERT INTO users (name, email, password_hash, role, hospital, phone, userid) VALUES (?, ?, ?, "patient", ?, ?, ?)',
-                [name, email, hashedPassword, hospital || req.user.hospital || null, phone, userid]
-            );
-            const patientId = userResult.insertId;
-
-            // 2. Grant access to the doctor automatically
-            await connection.query(
-                'INSERT INTO access_requests (doctor_id, patient_id, status) VALUES (?, ?, "approved")',
-                [req.user.id, patientId]
-            );
-
-            // 3. Insert Prescription if provided
-            if (prescriptionTitle && prescriptionDesc) {
-                await connection.query(
-                    'INSERT INTO health_records (patient_id, record_type, title, description) VALUES (?, "prescription", ?, ?)',
-                    [patientId, prescriptionTitle, prescriptionDesc]
-                );
-            }
-
-            // 4. Insert Health Issue (as allergy) if provided
-            if (healthIssueTitle && healthIssueDesc) {
-                await connection.query(
-                    'INSERT INTO health_records (patient_id, record_type, title, description) VALUES (?, "allergy", ?, ?)',
-                    [patientId, healthIssueTitle, healthIssueDesc]
-                );
-            }
-
-            await connection.commit();
-            
-            const smsMessage = `Welcome to MedGuardian! Your UserID is ${userid}. This acts as your login key.`;
-            const smsResult = await sendSMS(phone, smsMessage);
-            
-            res.status(201).json({ 
-                message: smsResult.success ? `Patient created and SMS sent via ${smsResult.provider}!` : 'Patient created successfully', 
-                patientId, 
-                simulatedSms: smsResult.provider === 'simulation' ? smsMessage : null,
-                smsSent: smsResult.success,
-                smsProvider: smsResult.provider
-            });
-        } catch (err) {
-            await connection.rollback();
-            if (err.code === 'ER_DUP_ENTRY') {
-                return res.status(400).json({ error: 'Email or UserID already exists' });
-            }
-            throw err;
-        } finally {
-            connection.release();
+        if (healthIssueTitle && healthIssueDesc) {
+            const hiRef = db.collection('health_records').doc();
+            batch.set(hiRef, { patient_id: patientRef.id, record_type: 'allergy', title: healthIssueTitle, description: healthIssueDesc, created_at: admin.firestore.FieldValue.serverTimestamp() });
         }
+        await batch.commit();
+
+        const smsMessage = `Welcome to MedGuardian! Your UserID is ${userid}. This acts as your login key.`;
+        const smsResult = await sendSMS(phone, smsMessage);
+        res.status(201).json({
+            message: smsResult.success ? `Patient created and SMS sent via ${smsResult.provider}!` : 'Patient created successfully',
+            patientId: patientRef.id,
+            simulatedSms: smsResult.provider === 'simulation' ? smsMessage : null,
+            smsSent: smsResult.success,
+            smsProvider: smsResult.provider,
+        });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
-// --- PATIENT ROUTES ---
-app.get('/api/access/requests', authenticate, async (req, res) => {
+// ─── PATIENT: Get access requests ────────────────────────────────────────────
+app.get('/api/access/requests', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'patient') return res.status(403).json({ error: 'Patients only' });
     try {
-        const [requests] = await pool.query(`
-            SELECT ar.id, ar.status, ar.created_at, u.name as doctor_name
-            FROM access_requests ar
-            JOIN users u ON ar.doctor_id = u.id
-            WHERE ar.patient_id = ?
-        `, [req.user.id]);
+        const snap = await db.collection('access_requests').where('patient_id', '==', req.user.id).get();
+        const requests = await Promise.all(snap.docs.map(async (doc) => {
+            const data = serializeDoc(doc.id, doc.data());
+            const doctorDoc = await db.collection('users').doc(data.doctor_id).get();
+            data.doctor_name = doctorDoc.exists ? doctorDoc.data().name : 'Unknown Doctor';
+            return data;
+        }));
         res.json(requests);
     } catch (err) {
         console.error(err);
@@ -502,18 +426,16 @@ app.get('/api/access/requests', authenticate, async (req, res) => {
     }
 });
 
-app.post('/api/access/respond', authenticate, async (req, res) => {
+// ─── PATIENT: Respond to access request ──────────────────────────────────────
+app.post('/api/access/respond', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'patient') return res.status(403).json({ error: 'Patients only' });
     try {
-        const { request_id, action } = req.body; // action: 'approved' or 'rejected'
+        const { request_id, action } = req.body;
         if (!['approved', 'rejected'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
-        
-        const [result] = await pool.query(
-            'UPDATE access_requests SET status = ? WHERE id = ? AND patient_id = ?',
-            [action, request_id, req.user.id]
-        );
-        if (result.affectedRows === 0) return res.status(404).json({ error: 'Request not found' });
-        
+        const docRef = db.collection('access_requests').doc(request_id);
+        const docSnap = await docRef.get();
+        if (!docSnap.exists || docSnap.data().patient_id !== req.user.id) return res.status(404).json({ error: 'Request not found' });
+        await docRef.update({ status: action });
         res.json({ message: `Request ${action}` });
     } catch (err) {
         console.error(err);
@@ -521,11 +443,13 @@ app.post('/api/access/respond', authenticate, async (req, res) => {
     }
 });
 
-// --- RECORD ROUTES ---
-app.get('/api/records/mine', authenticate, async (req, res) => {
+// ─── PATIENT: Get my health records ──────────────────────────────────────────
+app.get('/api/records/mine', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'patient') return res.status(403).json({ error: 'Patients only' });
     try {
-        const [records] = await pool.query('SELECT * FROM health_records WHERE patient_id = ? ORDER BY id ASC', [req.user.id]);
+        const snap = await db.collection('health_records').where('patient_id', '==', req.user.id).get();
+        const records = snap.docs.map(d => serializeDoc(d.id, d.data()));
+        records.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         res.json(records);
     } catch (err) {
         console.error(err);
@@ -533,66 +457,35 @@ app.get('/api/records/mine', authenticate, async (req, res) => {
     }
 });
 
-app.post('/api/records/upload', authenticate, async (req, res, next) => {
-    // Vercel has a read-only filesystem — file uploads are disabled in production.
-    // To enable uploads, deploy on a self-hosted server or use a cloud storage provider (e.g. Cloudinary).
-    if (IS_VERCEL) {
-        return res.status(503).json({
-            error: 'File uploads are not supported in the cloud deployment. Please use the locally hosted version to upload reports.'
-        });
-    }
-    // Only process upload middleware locally
+// ─── PATIENT: Upload report ───────────────────────────────────────────────────
+app.post('/api/records/upload', authenticate, requireDB, (req, res) => {
     upload.single('report')(req, res, async (uploadErr) => {
         if (uploadErr) return res.status(400).json({ error: uploadErr.message });
         if (!req.user || req.user.role !== 'patient') return res.status(403).json({ error: 'Patients only' });
         if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
         try {
-            const filePath = req.file.path;
-            let analysisText = 'No analysis available.';
-
-            if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_actual_gemini_api_key_here') {
+            let analysisText = 'AI Analysis (Simulated): Patient shows normal CBC and metabolic panel. Cholesterol is slightly elevated (LDL 130 mg/dL). No acute anomalies detected. Continue current medication plan.';
+            if (process.env.GEMINI_API_KEY) {
                 try {
                     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
                     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-
-                    const fileBytes = fs.readFileSync(filePath);
-                    const prompt = 'You are a medical AI assistant. Extract the key patient details, diagnosis, and any important findings from this health report. Keep it concise, professional, and limit the response to 3-4 sentences maximum.';
-
-                    let mimeType = req.file.mimetype;
-                    if (req.file.originalname.toLowerCase().endsWith('.pdf')) {
-                        mimeType = 'application/pdf';
-                    }
-
+                    const fileBytes = fs.readFileSync(req.file.path);
+                    const mimeType = req.file.originalname.toLowerCase().endsWith('.pdf') ? 'application/pdf' : req.file.mimetype;
                     const aiResult = await model.generateContent([
-                        prompt,
-                        { inlineData: { data: fileBytes.toString('base64'), mimeType } }
+                        'You are a medical AI assistant. Extract key patient details, diagnosis, and important findings from this health report. Keep it concise and limit to 3-4 sentences.',
+                        { inlineData: { data: fileBytes.toString('base64'), mimeType } },
                     ]);
                     analysisText = 'AI Analysis: ' + aiResult.response.text();
                 } catch (aiErr) {
-                    console.error('AI Error:', aiErr);
-                    analysisText = 'AI Analysis simulated (API Error): Lab results indicate slightly elevated HbA1c levels. Blood pressure is within normal ranges. Recommended follow-up in 3 months.';
+                    console.error('AI Error:', aiErr.message);
                 }
-            } else {
-                analysisText = 'AI Analysis (Simulated): Patient shows normal CBC and metabolic panel. Cholesterol is slightly elevated (LDL 130 mg/dL). No acute anomalies detected. Continue current medication plan.';
             }
-
-            const extractedTitle = req.file.originalname;
-            const [result] = await pool.query(
-                'INSERT INTO health_records (patient_id, record_type, title, description) VALUES (?, ?, ?, ?)',
-                [req.user.id, 'lab_report', `Uploaded Report: ${extractedTitle}`, analysisText]
-            );
-
-            res.status(201).json({
-                message: 'File uploaded and analyzed successfully',
-                record: {
-                    id: result.insertId,
-                    patient_id: req.user.id,
-                    record_type: 'lab_report',
-                    title: `Uploaded Report: ${extractedTitle}`,
-                    description: analysisText
-                }
+            const title = `Uploaded Report: ${req.file.originalname}`;
+            const docRef = await db.collection('health_records').add({
+                patient_id: req.user.id, record_type: 'lab_report', title, description: analysisText,
+                created_at: admin.firestore.FieldValue.serverTimestamp(),
             });
+            res.status(201).json({ message: 'File uploaded and analyzed successfully', record: { id: docRef.id, patient_id: req.user.id, record_type: 'lab_report', title, description: analysisText } });
         } catch (err) {
             console.error(err);
             res.status(500).json({ error: 'Server error' });
@@ -600,11 +493,13 @@ app.post('/api/records/upload', authenticate, async (req, res, next) => {
     });
 });
 
-app.get('/api/records/patient/:patient_id', authenticate, async (req, res) => {
+// ─── DOCTOR: Get patient records ──────────────────────────────────────────────
+app.get('/api/records/patient/:patient_id', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'doctor') return res.status(403).json({ error: 'Doctors only' });
     try {
-        const patientId = req.params.patient_id;
-        const [records] = await pool.query('SELECT * FROM health_records WHERE patient_id = ? ORDER BY id ASC', [patientId]);
+        const snap = await db.collection('health_records').where('patient_id', '==', req.params.patient_id).get();
+        const records = snap.docs.map(d => serializeDoc(d.id, d.data()));
+        records.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         res.json(records);
     } catch (err) {
         console.error(err);
@@ -612,29 +507,26 @@ app.get('/api/records/patient/:patient_id', authenticate, async (req, res) => {
     }
 });
 
-// --- ADMIN ROUTES ---
-app.get('/api/admin/directory', authenticate, async (req, res) => {
+// ─── ADMIN: Directory ─────────────────────────────────────────────────────────
+app.get('/api/admin/directory', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
     try {
-        // Fetch all doctors
-        const [doctors] = await pool.query('SELECT id, name, email, hospital FROM users WHERE role = "doctor" ORDER BY name ASC');
-        
-        // Fetch all patients assigned to doctors
-        const [patients] = await pool.query(`
-            SELECT u.id, u.name, u.email, u.hospital, ar.doctor_id 
-            FROM users u
-            JOIN access_requests ar ON u.id = ar.patient_id
-            WHERE u.role = "patient" AND ar.status = "approved"
-        `);
-        
-        // Group patients by doctor
-        const directory = doctors.map(doc => {
-            return {
-                ...doc,
-                patients: patients.filter(p => p.doctor_id === doc.id)
-            };
+        const [doctorsSnap, patientsSnap, accessSnap] = await Promise.all([
+            db.collection('users').where('role', '==', 'doctor').get(),
+            db.collection('users').where('role', '==', 'patient').get(),
+            db.collection('access_requests').where('status', '==', 'approved').get(),
+        ]);
+        const patientsMap = {};
+        patientsSnap.docs.forEach(d => { patientsMap[d.id] = serializeDoc(d.id, d.data()); });
+
+        const directory = doctorsSnap.docs.map(d => {
+            const doctor = serializeDoc(d.id, d.data());
+            doctor.patients = accessSnap.docs
+                .filter(a => a.data().doctor_id === d.id && patientsMap[a.data().patient_id])
+                .map(a => patientsMap[a.data().patient_id]);
+            return doctor;
         });
-        
+        directory.sort((a, b) => a.name.localeCompare(b.name));
         res.json(directory);
     } catch (err) {
         console.error(err);
@@ -642,146 +534,71 @@ app.get('/api/admin/directory', authenticate, async (req, res) => {
     }
 });
 
-// Create Doctor Endpoint
-app.post('/api/admin/create-doctor', authenticate, async (req, res) => {
+// ─── ADMIN: Create doctor ─────────────────────────────────────────────────────
+app.post('/api/admin/create-doctor', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
     try {
         const { name, email, hospital } = req.body;
         if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
-        
-        await pool.query(
-            'INSERT INTO users (name, email, password_hash, role, hospital) VALUES (?, ?, NULL, "doctor", ?)',
-            [name, email, hospital || 'Independent']
-        );
+        const emailCheck = await db.collection('users').where('email', '==', email).limit(1).get();
+        if (!emailCheck.empty) return res.status(400).json({ error: 'Email already exists' });
+        await db.collection('users').add({
+            name, email, role: 'doctor',
+            hospital: hospital || 'Independent',
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+        });
         res.status(201).json({ message: 'Doctor account created successfully. They can now log in to set up their device key.' });
     } catch (err) {
-        if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Email already exists' });
         console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
-// Delete Doctor Endpoint
-app.delete('/api/admin/delete-doctor/:id', authenticate, async (req, res) => {
+// ─── ADMIN: Delete doctor ─────────────────────────────────────────────────────
+app.delete('/api/admin/delete-doctor/:id', authenticate, requireDB, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
     try {
         const doctorId = req.params.id;
+        const doctorDoc = await db.collection('users').doc(doctorId).get();
+        if (!doctorDoc.exists || doctorDoc.data().role !== 'doctor') return res.status(404).json({ error: 'Doctor not found' });
 
-        // Verify target is a doctor (can't delete patients or admins this way)
-        const [rows] = await pool.query('SELECT id, name FROM users WHERE id = ? AND role = "doctor"', [doctorId]);
-        if (rows.length === 0) return res.status(404).json({ error: 'Doctor not found' });
+        const [credsSnap, challengeSnap] = await Promise.all([
+            db.collection('user_crypto_credentials').where('user_id', '==', doctorId).get(),
+            db.collection('auth_challenges').where('user_id', '==', doctorId).get(),
+        ]);
+        const batch = db.batch();
+        credsSnap.docs.forEach(d => batch.delete(d.ref));
+        challengeSnap.docs.forEach(d => batch.delete(d.ref));
+        batch.delete(db.collection('users').doc(doctorId));
+        await batch.commit();
 
-        // Remove crypto credentials first (FK constraint)
-        await pool.query('DELETE FROM user_crypto_credentials WHERE user_id = ?', [doctorId]);
-        // Remove auth challenges
-        await pool.query('DELETE FROM auth_challenges WHERE user_id = ?', [doctorId]);
-        // Remove the user
-        await pool.query('DELETE FROM users WHERE id = ?', [doctorId]);
-
-        await logAudit(req.user.id, `Deleted Doctor Account: ${rows[0].name} (ID ${doctorId})`, req.ip, req.headers['user-agent']);
-        res.json({ message: `Doctor account for ${rows[0].name} has been removed.` });
+        await logAudit(req.user.id, `Deleted Doctor Account: ${doctorDoc.data().name} (ID ${doctorId})`, req.ip, req.headers['user-agent']);
+        res.json({ message: `Doctor account for ${doctorDoc.data().name} has been removed.` });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
-// Database initialization: create all tables then seed admin
-async function initDatabase() {
-    try {
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                email VARCHAR(255) UNIQUE NOT NULL,
-                password_hash VARCHAR(255),
-                role ENUM('patient','doctor','admin') NOT NULL,
-                hospital VARCHAR(255) DEFAULT NULL,
-                phone VARCHAR(20) DEFAULT NULL,
-                userid VARCHAR(50) UNIQUE DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS access_requests (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                doctor_id INT NOT NULL,
-                patient_id INT NOT NULL,
-                status ENUM('pending','approved','rejected') DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE CASCADE,
-                FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE,
-                UNIQUE KEY unique_request (doctor_id, patient_id)
-            )
-        `);
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS health_records (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                patient_id INT NOT NULL,
-                record_type ENUM('prescription','lab_report','imaging','allergy','vaccination') NOT NULL,
-                title VARCHAR(255) NOT NULL,
-                description TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        `);
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS user_crypto_credentials (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT NOT NULL,
-                role VARCHAR(50) NOT NULL,
-                public_key TEXT NOT NULL,
-                key_algorithm VARCHAR(50) DEFAULT 'ECDSA',
-                device_name VARCHAR(255) DEFAULT 'Unknown Browser',
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_used_at TIMESTAMP NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        `);
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS auth_challenges (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT NOT NULL,
-                challenge_nonce VARCHAR(255) NOT NULL,
-                expires_at TIMESTAMP NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        `);
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS audit_logs (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT,
-                action VARCHAR(255) NOT NULL,
-                ip_address VARCHAR(100),
-                device_info TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('Database tables verified/created.');
-
-        // Seed admin account
-        const [rows] = await pool.query('SELECT id FROM users WHERE email = ?', ['admin@gmail.com']);
-        if (rows.length === 0) {
-            await pool.query(
-                'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, NULL, ?)',
-                ['Admin', 'admin@gmail.com', 'admin']
-            );
-            console.log('Seeded initial admin account (admin@gmail.com)');
-        }
-    } catch (err) {
-        console.error('Database initialization failed:', err.message);
-        // Do not crash the process — Railway will show logs; DB env vars may need setting.
-    }
-}
-
-// Export the Express app for Vercel serverless functions.
-// When running locally with `node server.js`, this also starts the server.
+// ═════════════════════════════════════════════════════════════════════════════
+//  SERVER START + ADMIN SEED
+// ═════════════════════════════════════════════════════════════════════════════
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`Server running on port ${PORT}`);
-    initDatabase();
+    if (!db) return;
+    try {
+        const adminSnap = await db.collection('users').where('email', '==', 'admin@gmail.com').limit(1).get();
+        if (adminSnap.empty) {
+            await db.collection('users').add({
+                name: 'Admin', email: 'admin@gmail.com', role: 'admin',
+                created_at: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            console.log('[Firebase] Seeded admin account: admin@gmail.com');
+        }
+    } catch (e) {
+        console.error('[Firebase] Failed to seed admin:', e.message);
+    }
 });
 
 module.exports = app;
