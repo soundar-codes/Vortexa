@@ -58,7 +58,7 @@ const upload = multer({ storage });
 // ─── Express Setup ────────────────────────────────────────────────────────────
 const app = express();
 app.use(cors({
-  origin: ['https://medguardian-92fde.web.app', 'http://localhost:3000'],
+  origin: ['https://medguardian-92fde.web.app', 'http://localhost:3000', '*'],
   credentials: true
 }));
 app.use(express.json());
@@ -84,6 +84,11 @@ app.get('/test-env', (req, res) => {
     hasJwtSecret: !!process.env.JWT_SECRET,
     projectId: process.env.FIREBASE_PROJECT_ID ? '***' + process.env.FIREBASE_PROJECT_ID.slice(-4) : 'missing'
   });
+});
+
+// Simple test endpoint without Firebase
+app.post('/api/test', (req, res) => {
+  res.json({ message: 'API endpoint working', body: req.body });
 });
 
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_medguardian_key';
