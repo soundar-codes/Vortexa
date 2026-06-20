@@ -26,7 +26,7 @@ try {
         });
     } else {
         throw new Error(
-            'Firebase credentials missing. Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY in Railway.'
+            'Firebase credentials missing. Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY.'
         );
     }
     admin.initializeApp({ credential });
