@@ -119,7 +119,7 @@
   .btn-ghost{background:#fff; color:var(--teal); border:1px solid var(--teal);}
   .btn-block{width:100%;}
 
-  select, input{
+  select, input, textarea{
     width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line);
     font-size:13px; font-family:Calibri; color:var(--ink); background:#fff;
   }
@@ -281,6 +281,7 @@
 
     <!-- data-role: 'patient' = only patients, 'doctor' = only doctors, 'both' = everyone -->
     <button class="nav-item active" data-page="dashboard" id="nav-dashboard"><svg viewBox="0 0 576 512"><path d="M576 256l-64 64H448l-32 96-96-224-32 64H64l-64-64h128l32-64 96 224 32-96h288z"/></svg><span id="nav-dashboard-label">My Health Vault</span></button>
+    <button class="nav-item" data-page="admin" data-role="admin" id="nav-admin"><svg viewBox="0 0 512 512"><path d="M256 0c4.6 0 9.2 1 13.4 2.9L457.7 82.8c22 9.3 38.4 31 38.3 57.2c-.5 99.2-41.3 280.7-213.6 363.2c-16.7 8-36.1 8-52.8 0C57.3 420.7 16.5 239.2 16 140c-.1-26.2 16.3-47.9 38.3-57.2L242.7 2.9C246.8 1 251.4 0 256 0zM140 236v-4c0-37.6 30.4-68 68-68h96c37.6 0 68 30.4 68 68v4c22.1 0 40 17.9 40 40v120c0 22.1-17.9 40-40 40H140c-22.1 0-40-17.9-40-40V276c0-22.1 17.9-40 40-40z"/></svg>Admin Dashboard</button>
     <button class="nav-item" data-page="register" data-role="doctor" id="nav-register"><svg viewBox="0 0 640 512"><path d="M96 128a128 128 0 1 1 256 0A128 128 0 1 1 96 128zM0 482.3C0 383.8 79.8 304 178.3 304h91.4C368.2 304 448 383.8 448 482.3c0 16.4-13.3 29.7-29.7 29.7H29.7C13.3 512 0 498.7 0 482.3zM504 312V248H440c-13.3 0-24-10.7-24-24s10.7-24 24-24h64V136c0-13.3 10.7-24 24-24s24 10.7 24 24v64h64c13.3 0 24 10.7 24 24s-10.7 24-24 24H552v64c0 13.3-10.7 24-24 24s-24-10.7-24-24z"/></svg>Register Patient</button>
     <button class="nav-item" data-page="guardian" data-role="doctor" id="nav-guardian"><svg viewBox="0 0 512 512"><path d="M225.8 468.2l-2.5-2.3L48.1 303.2C19 274.7 0 234.7 0 191.1 0 110.3 65.5 48 144 48c39.1 0 76.3 14.5 104.8 41.5L256 96l7.2-6.5C291.7 62.5 328.9 48 368 48c78.5 0 144 62.3 144 143.1 0 43.6-19 83.6-48.1 112.1L255.8 468.2c-8.8 8.5-22.8 8.5-30 0z"/></svg>AI Medication Guardian</button>
     <button class="nav-item" data-page="fraud" data-role="doctor" id="nav-fraud"><svg viewBox="0 0 512 512"><path d="M256 32c14.2 0 27.3 7.5 34.5 19.8l216 368c7.3 12.4 7.3 27.7.2 40.1S486.3 480 472 480H40c-14.3 0-27.6-7.7-34.7-20.1s-7-27.8.2-40.1l216-368C228.7 39.5 241.8 32 256 32zm0 128c-13.3 0-24 10.7-24 24V296c0 13.3 10.7 24 24 24s24-10.7 24-24V184c0-13.3-10.7-24-24-24zm32 224a32 32 0 1 0-64 0 32 32 0 1 0 64 0z"/></svg>Fraud Detection</button>
@@ -394,6 +395,10 @@
       </div>
       <div class="card" style="max-width: 600px;">
         <form id="create-patient-form" onsubmit="createPatient(event)">
+          <div class="field-group" id="doctor-name-group" style="display:none;">
+            <label class="field">Registering Doctor</label>
+            <input type="text" id="cp-doctor-name" readonly style="background-color: #f1f5f9; color: var(--muted); cursor: not-allowed; border-color: transparent;">
+          </div>
           <div class="field-group">
             <label class="field">Patient Name</label>
             <input type="text" id="cp-name" required>
@@ -414,12 +419,12 @@
           <div class="field-group">
             <label class="field">Prescription Detail (Optional)</label>
             <input type="text" id="cp-rx-title" placeholder="e.g. Metformin 500mg" style="margin-bottom:6px;">
-            <input type="text" id="cp-rx-desc" placeholder="Instructions e.g. Take 1 after dinner">
+            <textarea id="cp-rx-desc" placeholder="Instructions e.g. Take 1 after dinner" rows="3" style="resize:vertical;"></textarea>
           </div>
           <div class="field-group">
             <label class="field">Health Issue / Allergy (Optional)</label>
             <input type="text" id="cp-hi-title" placeholder="e.g. Allergy — Penicillin" style="margin-bottom:6px;">
-            <input type="text" id="cp-hi-desc" placeholder="Description">
+            <textarea id="cp-hi-desc" placeholder="Description" rows="3" style="resize:vertical;"></textarea>
           </div>
           <button type="submit" class="btn btn-primary btn-block" id="cp-btn">Create Patient Account</button>
         </form>
@@ -560,6 +565,19 @@
       </div>
     </div>
 
+    <!-- ADMIN DASHBOARD -->
+    <div class="page" id="page-admin" data-role="admin">
+      <div class="pagehead">
+        <h2>Admin Directory</h2>
+        <p>Global view of all registered doctors and their associated patients.</p>
+      </div>
+      <div class="card">
+        <div id="admin-directory-container">
+          <p style="font-size:12px; color:var(--muted);">Loading directory...</p>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -600,7 +618,22 @@ function logout() {
     document.getElementById('patient-dashboard-grid').style.display = 'none';
     document.getElementById('doctor-dashboard-grid').style.display = 'grid';
     document.getElementById('doctor-search-bar').classList.add('visible');
+    
+    // Auto-fill registering doctor's name
+    const docNameField = document.getElementById('cp-doctor-name');
+    if (docNameField) {
+        document.getElementById('doctor-name-group').style.display = 'block';
+        docNameField.value = 'Dr. ' + user.name;
+    }
+    
     loadPatients();
+  } else if (role === 'admin') {
+    document.getElementById('nav-dashboard').style.display = 'none';
+    document.getElementById('nav-admin').classList.add('active');
+    document.getElementById('page-dashboard').classList.remove('active');
+    document.getElementById('page-admin').classList.add('active');
+    document.getElementById('dashboard-title').innerText = `Welcome, Admin ${user.name}`;
+    loadAdminDirectory();
   } else {
     // Patient
     document.getElementById('nav-dashboard-label').innerText = 'My Health Vault';
@@ -805,14 +838,8 @@ function renderPatientList(patients) {
             </div>
         `;
         groups[hospital].forEach(p => {
-            let actionBtn = '';
-            if (p.status === 'approved') {
-                actionBtn = `<button class="btn btn-ghost" style="padding:7px 14px; font-size:11.5px;" onclick="viewPatientVault(${p.id}, '${p.name}')">View Vault</button>`;
-            } else if (p.status === 'pending') {
-                actionBtn = `<button class="btn btn-ghost" style="padding:7px 14px; font-size:11.5px; opacity:0.6;" disabled>Request Pending</button>`;
-            } else {
-                actionBtn = `<button class="btn btn-primary" style="padding:7px 14px; font-size:11.5px;" onclick="requestAccess(${p.id})">Request Access</button>`;
-            }
+            let actionBtn = `<button class="btn btn-ghost" style="padding:7px 14px; font-size:11.5px; border: 1px solid var(--teal);" onclick="viewPatientVault(${p.id}, '${p.name}')">View Vault</button>`;
+            
             html += `
               <div class="vault-item" style="margin-left:20px; border-left:2px solid #028090; padding-left:14px; margin-bottom:8px;">
                 <div class="icon-circle" style="background:#11304F"><svg viewBox="0 0 448 512"><path d="M224 256A128 128 0 1 0 224 0a128 128 0 1 0 0 256zm-45.7 48C79.8 304 0 383.8 0 482.3C0 498.7 13.3 512 29.7 512H418.3c16.4 0 29.7-13.3 29.7-29.7C448 383.8 368.2 304 269.7 304H178.3z"/></svg></div>
@@ -1360,6 +1387,57 @@ async function createPatient(e) {
     btn.disabled = false;
     btn.textContent = 'Create Patient Account';
   }
+}
+
+// ---------- Admin Directory ----------
+async function loadAdminDirectory() {
+    try {
+        const res = await fetch(`${API_BASE}/admin/directory`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!res.ok) throw new Error('Failed to load directory');
+        const directory = await res.json();
+        
+        let html = '';
+        if (directory.length === 0) {
+            html = '<p style="font-size:12px; color:var(--muted); text-align:center;">No doctors registered in the system yet.</p>';
+        } else {
+            directory.forEach(doc => {
+                html += `
+                  <div style="margin-bottom:24px; padding-bottom:18px; border-bottom:1px solid var(--line);">
+                    <div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;">
+                      <div class="icon-circle" style="background:var(--navy)"><svg viewBox="0 0 448 512"><path d="M224 256A128 128 0 1 0 224 0a128 128 0 1 0 0 256zm-45.7 48C79.8 304 0 383.8 0 482.3C0 498.7 13.3 512 29.7 512H418.3c16.4 0 29.7-13.3 29.7-29.7C448 383.8 368.2 304 269.7 304H178.3z"/></svg></div>
+                      <div>
+                        <h3 style="font-size:16px; margin:0; color:var(--navy);">Dr. ${doc.name}</h3>
+                        <div style="font-size:12px; color:var(--muted); margin-top:2px;">${doc.hospital || 'Independent'} · ${doc.email}</div>
+                      </div>
+                    </div>
+                `;
+                
+                if (doc.patients && doc.patients.length > 0) {
+                    html += `<div style="margin-left:54px;">`;
+                    html += `<div style="font-size:11px; font-weight:bold; color:var(--teal); text-transform:uppercase; margin-bottom:8px; letter-spacing:0.04em;">Assigned Patients (${doc.patients.length})</div>`;
+                    doc.patients.forEach(p => {
+                        html += `
+                          <div class="vault-item" style="padding: 8px 0; border-bottom: 1px dashed var(--line);">
+                            <div class="meta" style="margin-left: 0;">
+                              <b style="font-size:13px;">${p.name}</b>
+                              <span style="font-size:11.5px;">${p.email} ${p.hospital ? '· ' + p.hospital : ''}</span>
+                            </div>
+                          </div>
+                        `;
+                    });
+                    html += `</div>`;
+                } else {
+                    html += `<div style="margin-left:54px; font-size:12px; color:var(--muted); font-style:italic;">No patients currently assigned.</div>`;
+                }
+                
+                html += `</div>`;
+            });
+        }
+        
+        document.getElementById('admin-directory-container').innerHTML = html;
+    } catch (err) {
+        document.getElementById('admin-directory-container').innerHTML = `<p style="color:var(--coral);">Error: ${err.message}</p>`;
+    }
 }
 </script>
 </body>

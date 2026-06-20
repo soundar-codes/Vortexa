@@ -8,6 +8,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -174,54 +175,179 @@ app.get('/api/emergency/:userid', async (req, res) => {
     }
 });
 
-// --- AUTH ROUTES ---
-app.post('/api/auth/signup', async (req, res) => {
-    try {
-        const { name, email, password, hospital } = req.body;
-        // Hardcode role to 'doctor' as patients can no longer sign up directly
-        if (!name || !email || !password) {
-            return res.status(400).json({ error: 'Name, email, and password required' });
-        }
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const [result] = await pool.query(
-            'INSERT INTO users (name, email, password_hash, role, hospital) VALUES (?, ?, ?, "doctor", ?)',
-            [name, email, hashedPassword, hospital || null]
-        );
+// --- CRYPTO AUTH ROUTES (PASSWORDLESS) ---
 
-        res.status(201).json({ message: 'Doctor created successfully', id: result.insertId });
-    } catch (err) {
-        if (err.code === 'ER_DUP_ENTRY') {
-            return res.status(400).json({ error: 'Email already exists' });
+// Helper function for Audit Logging
+async function logAudit(userId, action, ip, deviceInfo) {
+    try {
+        await pool.query(
+            'INSERT INTO audit_logs (user_id, action, ip_address, device_info) VALUES (?, ?, ?, ?)',
+            [userId, action, ip, deviceInfo]
+        );
+    } catch (e) {
+        console.error('Audit log failed:', e);
+    }
+}
+
+// 1. Registration Flow
+app.post('/api/auth/crypto/:role/register', async (req, res) => {
+    try {
+        const role = req.params.role;
+        const { name, email, publicKey, deviceName } = req.body;
+        if (!name || !email || !publicKey) {
+            return res.status(400).json({ error: 'Missing required fields' });
         }
+        if (role !== 'doctor' && role !== 'admin') {
+            return res.status(400).json({ error: 'Invalid role for cryptographic registration' });
+        }
+
+        const connection = await pool.getConnection();
+        await connection.beginTransaction();
+
+        try {
+            // Create user without password (password_hash is NULL)
+            const [userResult] = await connection.query(
+                'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, NULL, ?)',
+                [name, email, role]
+            );
+            const userId = userResult.insertId;
+
+            // Store public key
+            await connection.query(
+                'INSERT INTO user_crypto_credentials (user_id, role, public_key, key_algorithm, device_name) VALUES (?, ?, ?, ?, ?)',
+                [userId, role, publicKey, 'ECDSA', deviceName || 'Unknown Browser']
+            );
+
+            await connection.commit();
+            await logAudit(userId, 'Registration', req.ip, req.headers['user-agent']);
+
+            res.status(201).json({ message: 'Cryptographic identity successfully generated and registered.', id: userId });
+        } catch (err) {
+            await connection.rollback();
+            if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Email already exists' });
+            throw err;
+        } finally {
+            connection.release();
+        }
+    } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
 
+// 2. Request Challenge (Login Step 1)
+app.post('/api/auth/crypto/:role/challenge', async (req, res) => {
+    try {
+        const role = req.params.role;
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Email required' });
+
+        if (role !== 'doctor' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
+
+        const [users] = await pool.query('SELECT id, role FROM users WHERE email = ? AND role = ?', [email, role]);
+        if (users.length === 0) return res.status(404).json({ error: 'User not found' });
+        const user = users[0];
+
+        // Generate 32-byte cryptographically secure random nonce
+        const nonce = crypto.randomBytes(32).toString('base64');
+        const expiresAt = new Date(Date.now() + 60 * 1000); // 60 seconds expiry
+
+        await pool.query(
+            'INSERT INTO auth_challenges (user_id, challenge_nonce, expires_at) VALUES (?, ?, ?)',
+            [user.id, nonce, expiresAt]
+        );
+
+        res.json({ challenge: nonce });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// 3. Verify Signature (Login Step 2)
+app.post('/api/auth/crypto/:role/verify', async (req, res) => {
+    try {
+        const role = req.params.role;
+        const { email, signature, clientDataJSON } = req.body;
+        if (!email || !signature || !clientDataJSON) return res.status(400).json({ error: 'Missing required fields' });
+
+        if (role !== 'doctor' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
+
+        // Parse clientDataJSON to get the challenge
+        let clientData;
+        try {
+            clientData = JSON.parse(Buffer.from(clientDataJSON, 'base64').toString('utf8'));
+        } catch (e) {
+            return res.status(400).json({ error: 'Invalid clientDataJSON' });
+        }
+        const returnedChallenge = clientData.challenge;
+
+        // Fetch User
+        const [users] = await pool.query('SELECT id, name, role, email FROM users WHERE email = ? AND role = ?', [email, role]);
+        if (users.length === 0) return res.status(404).json({ error: 'User not found' });
+        const user = users[0];
+
+        // Fetch valid challenge (replay protection & expiry check)
+        const [challenges] = await pool.query(
+            'SELECT id FROM auth_challenges WHERE user_id = ? AND challenge_nonce = ? AND expires_at > NOW()',
+            [user.id, returnedChallenge]
+        );
+        if (challenges.length === 0) {
+            await logAudit(user.id, 'Login Failure - Expired/Invalid Challenge', req.ip, req.headers['user-agent']);
+            return res.status(401).json({ error: 'Invalid or expired challenge' });
+        }
+
+        // Delete challenge so it can't be reused (One-time use)
+        await pool.query('DELETE FROM auth_challenges WHERE id = ?', [challenges[0].id]);
+
+        // Fetch Public Key
+        const [creds] = await pool.query('SELECT public_key, id FROM user_crypto_credentials WHERE user_id = ? AND is_active = TRUE', [user.id]);
+        if (creds.length === 0) {
+            await logAudit(user.id, 'Login Failure - No Active Device', req.ip, req.headers['user-agent']);
+            return res.status(401).json({ error: 'No registered cryptographic identity found on this device.' });
+        }
+
+        const publicKeyPem = creds[0].public_key;
+
+        // Verify Signature using ieee-p1363 format (Web Crypto default for ECDSA)
+        const isValid = crypto.verify(
+            'SHA256',
+            Buffer.from(clientDataJSON, 'base64'),
+            { key: publicKeyPem, dsaEncoding: 'ieee-p1363' },
+            Buffer.from(signature, 'base64')
+        );
+
+        if (!isValid) {
+            await logAudit(user.id, 'Login Failure - Invalid Signature', req.ip, req.headers['user-agent']);
+            return res.status(401).json({ error: 'Invalid cryptographic signature' });
+        }
+
+        // Update last used
+        await pool.query('UPDATE user_crypto_credentials SET last_used_at = NOW() WHERE id = ?', [creds[0].id]);
+        await logAudit(user.id, 'Login Success', req.ip, req.headers['user-agent']);
+
+        // Issue JWT
+        const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
+        res.json({ message: 'Cryptographic authentication successful.', token, user: { id: user.id, name: user.name, role: user.role, email: user.email } });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Patient Login (unchanged)
 app.post('/api/auth/login', async (req, res) => {
     try {
-        const { email, password, userid } = req.body;
+        const { userid } = req.body;
+        if (!userid) return res.status(400).json({ error: 'UserID required' });
+
+        const [rows] = await pool.query('SELECT * FROM users WHERE userid = ? AND role = "patient"', [userid]);
+        if (rows.length === 0) return res.status(401).json({ error: 'Invalid UserID' });
         
-        if (userid) {
-            // Patient Login via UserID
-            const [rows] = await pool.query('SELECT * FROM users WHERE userid = ? AND role = "patient"', [userid]);
-            if (rows.length === 0) return res.status(401).json({ error: 'Invalid UserID' });
-            
-            const user = rows[0];
-            const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
-            return res.json({ token, user: { id: user.id, name: user.name, role: user.role, email: user.email, userid: user.userid } });
-        } else {
-            // Doctor Login via Email/Password
-            const [rows] = await pool.query('SELECT * FROM users WHERE email = ? AND role = "doctor"', [email]);
-            if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-
-            const user = rows[0];
-            const isMatch = await bcrypt.compare(password, user.password_hash);
-            if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
-
-            const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
-            return res.json({ token, user: { id: user.id, name: user.name, role: user.role, email: user.email } });
-        }
+        const user = rows[0];
+        const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '24h' });
+        return res.json({ token, user: { id: user.id, name: user.name, role: user.role, email: user.email, userid: user.userid } });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
@@ -450,15 +576,38 @@ app.get('/api/records/patient/:patient_id', authenticate, async (req, res) => {
     if (req.user.role !== 'doctor') return res.status(403).json({ error: 'Doctors only' });
     try {
         const patientId = req.params.patient_id;
-        const [accessCheck] = await pool.query(
-            'SELECT * FROM access_requests WHERE doctor_id = ? AND patient_id = ? AND status = "approved"',
-            [req.user.id, patientId]
-        );
-        if (accessCheck.length === 0) {
-            return res.status(403).json({ error: 'You do not have approved access to this patient' });
-        }
         const [records] = await pool.query('SELECT * FROM health_records WHERE patient_id = ? ORDER BY id ASC', [patientId]);
         res.json(records);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// --- ADMIN ROUTES ---
+app.get('/api/admin/directory', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
+    try {
+        // Fetch all doctors
+        const [doctors] = await pool.query('SELECT id, name, email, hospital FROM users WHERE role = "doctor" ORDER BY name ASC');
+        
+        // Fetch all patients assigned to doctors
+        const [patients] = await pool.query(`
+            SELECT u.id, u.name, u.email, u.hospital, ar.doctor_id 
+            FROM users u
+            JOIN access_requests ar ON u.id = ar.patient_id
+            WHERE u.role = "patient" AND ar.status = "approved"
+        `);
+        
+        // Group patients by doctor
+        const directory = doctors.map(doc => {
+            return {
+                ...doc,
+                patients: patients.filter(p => p.doctor_id === doc.id)
+            };
+        });
+        
+        res.json(directory);
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
