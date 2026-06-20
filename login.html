@@ -92,10 +92,8 @@
   
   <div class="tabs" id="tab-container">
     <div class="tab active" id="tab-patient-login" onclick="switchTab('patient-login')">Patient</div>
-    <div class="tab" id="tab-doctor-login" onclick="switchTab('doctor-login')">Dr. Login</div>
-    <div class="tab" id="tab-doctor-signup" onclick="switchTab('doctor-signup')">Dr. Signup</div>
-    <div class="tab" id="tab-admin-login" onclick="switchTab('admin-login')">Admin Login</div>
-    <div class="tab" id="tab-admin-signup" onclick="switchTab('admin-signup')">Admin Signup</div>
+    <div class="tab" id="tab-staff-login" onclick="switchTab('staff-login')">Staff Login</div>
+    <div class="tab" id="tab-staff-signup" onclick="switchTab('staff-signup')">Staff Signup</div>
   </div>
 
   <div class="error-msg" id="error-msg"></div>
@@ -110,65 +108,42 @@
     <button type="submit" class="btn">Access Vault</button>
   </form>
 
-  <!-- Doctor Passwordless Login Form -->
-  <form id="doctor-login-form" onsubmit="handleStaffLogin(event, 'doctor')" style="display:none;">
+  <!-- Staff Passwordless Login Form -->
+  <form id="staff-login-form" onsubmit="handleStaffLogin(event)" style="display:none;">
     <div class="crypto-badge">🔒 Hardware-Backed Cryptographic Login</div>
     <div class="form-group">
+      <label>Role</label>
+      <select id="login-role">
+          <option value="doctor">Doctor</option>
+          <option value="admin">Administrator</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label>Email Address</label>
-      <input type="email" id="doctor-login-email" required placeholder="doctor@hospital.com">
+      <input type="email" id="staff-login-email" required placeholder="name@hospital.com">
     </div>
-    <button type="submit" class="btn" id="btn-doctor-login">Authenticate Securely</button>
-    <div style="text-align:center; margin-top:14px; font-size:12px;">
-      <a href="#" onclick="switchTab('doctor-signup')" style="color:var(--teal);">New Doctor? Generate Access Key</a>
-    </div>
+    <button type="submit" class="btn" id="btn-staff-login">Authenticate Securely</button>
   </form>
 
-  <!-- Doctor Passwordless Signup Form -->
-  <form id="doctor-signup-form" onsubmit="handleStaffSignup(event, 'doctor')" style="display:none;">
+  <!-- Staff Passwordless Signup Form -->
+  <form id="staff-signup-form" onsubmit="handleStaffSignup(event)" style="display:none;">
     <div class="crypto-badge">🔑 Generating local cryptographic identity</div>
     <div class="form-group">
-      <label>Full Name</label>
-      <input type="text" id="doctor-signup-name" required>
+      <label>Role</label>
+      <select id="signup-role">
+          <option value="doctor">Doctor</option>
+          <option value="admin">Administrator</option>
+      </select>
     </div>
-    <div class="form-group">
-      <label>Email Address</label>
-      <input type="email" id="doctor-signup-email" required>
-    </div>
-    <button type="submit" class="btn" id="btn-doctor-register">Generate Key & Register</button>
-    <div style="text-align:center; margin-top:14px; font-size:12px;">
-      <a href="#" onclick="switchTab('doctor-login')" style="color:var(--teal);">Back to Login</a>
-    </div>
-  </form>
-
-  <!-- Admin Passwordless Login Form -->
-  <form id="admin-login-form" onsubmit="handleStaffLogin(event, 'admin')" style="display:none;">
-    <div class="crypto-badge">🔒 Hardware-Backed Cryptographic Login</div>
-    <div class="form-group">
-      <label>Email Address</label>
-      <input type="email" id="admin-login-email" required placeholder="admin@medguardian.ai">
-    </div>
-    <button type="submit" class="btn" id="btn-admin-login">Authenticate Securely</button>
-    <div style="text-align:center; margin-top:14px; font-size:12px;">
-      <a href="#" onclick="switchTab('admin-signup')" style="color:var(--teal);">New Admin? Generate Access Key</a>
-    </div>
-  </form>
-
-  <!-- Admin Passwordless Signup Form -->
-  <form id="admin-signup-form" onsubmit="handleStaffSignup(event, 'admin')" style="display:none;">
-    <div class="crypto-badge">🔑 Generating local cryptographic identity</div>
     <div class="form-group">
       <label>Full Name</label>
-      <input type="text" id="admin-signup-name" required>
+      <input type="text" id="staff-signup-name" required>
     </div>
     <div class="form-group">
       <label>Email Address</label>
-      <input type="email" id="admin-signup-email" required>
+      <input type="email" id="staff-signup-email" required>
     </div>
-    <button type="submit" class="btn" id="btn-admin-register">Generate Key & Register</button>
-    <div style="text-align:center; margin-top:14px; font-size:12px;">
-      <a href="#" onclick="switchTab('admin-login')" style="color:var(--teal);">Back to Login</a>
-    </div>
-  </form>
+    <button type="submit" class="btn" id="btn-staff-register">Generate Key & Register</button>
   </form>
 </div>
 
@@ -184,16 +159,12 @@
     clearMessages();
     
     document.getElementById('tab-patient-login').classList.remove('active');
-    document.getElementById('tab-doctor-login').classList.remove('active');
-    document.getElementById('tab-doctor-signup').classList.remove('active');
-    document.getElementById('tab-admin-login').classList.remove('active');
-    document.getElementById('tab-admin-signup').classList.remove('active');
+    document.getElementById('tab-staff-login').classList.remove('active');
+    document.getElementById('tab-staff-signup').classList.remove('active');
     
     document.getElementById('patient-login-form').style.display = 'none';
-    document.getElementById('doctor-login-form').style.display = 'none';
-    document.getElementById('doctor-signup-form').style.display = 'none';
-    document.getElementById('admin-login-form').style.display = 'none';
-    document.getElementById('admin-signup-form').style.display = 'none';
+    document.getElementById('staff-login-form').style.display = 'none';
+    document.getElementById('staff-signup-form').style.display = 'none';
     
     if (document.getElementById('device-request-panel')) {
         document.getElementById('device-request-panel').style.display = 'none';
@@ -204,18 +175,12 @@
     if (tab === 'patient-login') {
       document.getElementById('tab-patient-login').classList.add('active');
       document.getElementById('patient-login-form').style.display = 'block';
-    } else if (tab === 'doctor-login') {
-      document.getElementById('tab-doctor-login').classList.add('active');
-      document.getElementById('doctor-login-form').style.display = 'block';
-    } else if (tab === 'doctor-signup') {
-      document.getElementById('tab-doctor-signup').classList.add('active');
-      document.getElementById('doctor-signup-form').style.display = 'block';
-    } else if (tab === 'admin-login') {
-      document.getElementById('tab-admin-login').classList.add('active');
-      document.getElementById('admin-login-form').style.display = 'block';
-    } else if (tab === 'admin-signup') {
-      document.getElementById('tab-admin-signup').classList.add('active');
-      document.getElementById('admin-signup-form').style.display = 'block';
+    } else if (tab === 'staff-login') {
+      document.getElementById('tab-staff-login').classList.add('active');
+      document.getElementById('staff-login-form').style.display = 'block';
+    } else if (tab === 'staff-signup') {
+      document.getElementById('tab-staff-signup').classList.add('active');
+      document.getElementById('staff-signup-form').style.display = 'block';
     }
   }
 
@@ -243,15 +208,16 @@
 
   // --- CRYPTO AUTHENTICATION (PASSWORDLESS) ---
 
-  async function handleStaffSignup(e, role) {
+  async function handleStaffSignup(e) {
       e.preventDefault();
       clearMessages();
-      const btn = document.getElementById(`btn-${role}-register`);
+      const btn = document.getElementById('btn-staff-register');
       btn.disabled = true;
       btn.innerText = 'Generating Keys...';
 
-      const name = document.getElementById(`${role}-signup-name`).value;
-      const email = document.getElementById(`${role}-signup-email`).value;
+      const role = document.getElementById('signup-role').value;
+      const name = document.getElementById('staff-signup-name').value;
+      const email = document.getElementById('staff-signup-email').value;
 
       try {
           // 1. Browser generates KeyPair (Private Key stays in IndexedDB)
@@ -275,8 +241,9 @@
           document.getElementById('success-msg').innerText = data.message; 
           
           setTimeout(() => {
-              switchTab(`${role}-login`);
-              document.getElementById(`${role}-login-email`).value = email;
+              switchTab('staff-login');
+              document.getElementById('login-role').value = role;
+              document.getElementById('staff-login-email').value = email;
           }, 2000);
 
       } catch (err) {
@@ -287,14 +254,15 @@
       }
   }
 
-  async function handleStaffLogin(e, role) {
+  async function handleStaffLogin(e) {
       e.preventDefault();
       clearMessages();
-      const btn = document.getElementById(`btn-${role}-login`);
+      const btn = document.getElementById('btn-staff-login');
       btn.disabled = true;
       btn.innerText = 'Verifying Identity...';
 
-      const email = document.getElementById(`${role}-login-email`).value;
+      const role = document.getElementById('login-role').value;
+      const email = document.getElementById('staff-login-email').value;
 
       try {
           // 1. Request Challenge
