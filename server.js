@@ -64,6 +64,12 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static(__dirname));
 
+// Debug logging
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_medguardian_key';
 
 // ─── JWT Middleware ───────────────────────────────────────────────────────────
