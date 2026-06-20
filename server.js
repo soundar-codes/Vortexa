@@ -189,12 +189,12 @@ async function logAudit(userId, action, ip, deviceInfo) {
     }
 }
 
-// 1. Registration Flow
+// 1. Device Registration Flow (Setup)
 app.post('/api/auth/crypto/:role/register', async (req, res) => {
     try {
         const role = req.params.role;
-        const { name, email, publicKey, deviceName } = req.body;
-        if (!name || !email || !publicKey) {
+        const { email, publicKey, deviceName } = req.body;
+        if (!email || !publicKey) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
         if (role !== 'doctor' && role !== 'admin') {
@@ -205,12 +205,20 @@ app.post('/api/auth/crypto/:role/register', async (req, res) => {
         await connection.beginTransaction();
 
         try {
-            // Create user without password (password_hash is NULL)
-            const [userResult] = await connection.query(
-                'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, NULL, ?)',
-                [name, email, role]
-            );
-            const userId = userResult.insertId;
+            // Find existing user (created by Admin)
+            const [users] = await connection.query('SELECT id FROM users WHERE email = ? AND role = ?', [email, role]);
+            if (users.length === 0) {
+                 await connection.rollback();
+                 return res.status(404).json({ error: 'Account not found. Please contact an administrator.' });
+            }
+            const userId = users[0].id;
+
+            // Ensure no existing active keys
+            const [existingKeys] = await connection.query('SELECT id FROM user_crypto_credentials WHERE user_id = ? AND is_active = TRUE', [userId]);
+            if (existingKeys.length > 0) {
+                 await connection.rollback();
+                 return res.status(403).json({ error: 'A device is already registered for this account.' });
+            }
 
             // Store public key
             await connection.query(
@@ -219,12 +227,11 @@ app.post('/api/auth/crypto/:role/register', async (req, res) => {
             );
 
             await connection.commit();
-            await logAudit(userId, 'Registration', req.ip, req.headers['user-agent']);
+            await logAudit(userId, 'Device Registration', req.ip, req.headers['user-agent']);
 
-            res.status(201).json({ message: 'Cryptographic identity successfully generated and registered.', id: userId });
+            res.status(201).json({ message: 'Device securely registered.', id: userId });
         } catch (err) {
             await connection.rollback();
-            if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Email already exists' });
             throw err;
         } finally {
             connection.release();
@@ -245,8 +252,14 @@ app.post('/api/auth/crypto/:role/challenge', async (req, res) => {
         if (role !== 'doctor' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
 
         const [users] = await pool.query('SELECT id, role FROM users WHERE email = ? AND role = ?', [email, role]);
-        if (users.length === 0) return res.status(404).json({ error: 'User not found' });
+        if (users.length === 0) return res.status(404).json({ error: 'Account not found. Please contact an administrator.' });
         const user = users[0];
+
+        // CHECK IF DEVICE SETUP IS REQUIRED
+        const [creds] = await pool.query('SELECT id FROM user_crypto_credentials WHERE user_id = ? AND is_active = TRUE', [user.id]);
+        if (creds.length === 0) {
+            return res.status(403).json({ error: 'Device not registered. Setting up secure key...', requiresSetup: true });
+        }
 
         // Generate 32-byte cryptographically secure random nonce
         const nonce = crypto.randomBytes(32).toString('base64');
@@ -613,6 +626,39 @@ app.get('/api/admin/directory', authenticate, async (req, res) => {
         res.status(500).json({ error: 'Server error' });
     }
 });
+
+// Create Doctor Endpoint
+app.post('/api/admin/create-doctor', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
+    try {
+        const { name, email, hospital } = req.body;
+        if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
+        
+        await pool.query(
+            'INSERT INTO users (name, email, password_hash, role, hospital) VALUES (?, ?, NULL, "doctor", ?)',
+            [name, email, hospital || 'Independent']
+        );
+        res.status(201).json({ message: 'Doctor account created successfully. They can now log in to set up their device key.' });
+    } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Email already exists' });
+        console.error(err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Database initialization: Seed Admin
+async function seedAdmin() {
+    try {
+        const [rows] = await pool.query('SELECT id FROM users WHERE email = ?', ['admin@gmail.com']);
+        if (rows.length === 0) {
+            await pool.query('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, NULL, ?)', ['Admin', 'admin@gmail.com', 'admin']);
+            console.log('Seeded initial admin account (admin@gmail.com)');
+        }
+    } catch (err) {
+        console.error('Failed to seed admin:', err);
+    }
+}
+seedAdmin();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

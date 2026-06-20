@@ -92,8 +92,7 @@
   
   <div class="tabs" id="tab-container">
     <div class="tab active" id="tab-patient-login" onclick="switchTab('patient-login')">Patient</div>
-    <div class="tab" id="tab-staff-login" onclick="switchTab('staff-login')">Staff Login</div>
-    <div class="tab" id="tab-staff-signup" onclick="switchTab('staff-signup')">Staff Signup</div>
+    <div class="tab" id="tab-staff-login" onclick="switchTab('staff-login')">Doctor</div>
   </div>
 
   <div class="error-msg" id="error-msg"></div>
@@ -125,25 +124,6 @@
     <button type="submit" class="btn" id="btn-staff-login">Authenticate Securely</button>
   </form>
 
-  <!-- Staff Passwordless Signup Form -->
-  <form id="staff-signup-form" onsubmit="handleStaffSignup(event)" style="display:none;">
-    <div class="crypto-badge">🔑 Generating local cryptographic identity</div>
-    <div class="form-group">
-      <label>Role</label>
-      <select id="signup-role">
-          <option value="doctor">Doctor</option>
-          <option value="admin">Administrator</option>
-      </select>
-    </div>
-    <div class="form-group">
-      <label>Full Name</label>
-      <input type="text" id="staff-signup-name" required>
-    </div>
-    <div class="form-group">
-      <label>Email Address</label>
-      <input type="email" id="staff-signup-email" required>
-    </div>
-    <button type="submit" class="btn" id="btn-staff-register">Generate Key & Register</button>
   </form>
 </div>
 
@@ -160,11 +140,9 @@
     
     document.getElementById('tab-patient-login').classList.remove('active');
     document.getElementById('tab-staff-login').classList.remove('active');
-    document.getElementById('tab-staff-signup').classList.remove('active');
     
     document.getElementById('patient-login-form').style.display = 'none';
     document.getElementById('staff-login-form').style.display = 'none';
-    document.getElementById('staff-signup-form').style.display = 'none';
     
     if (document.getElementById('device-request-panel')) {
         document.getElementById('device-request-panel').style.display = 'none';
@@ -178,9 +156,6 @@
     } else if (tab === 'staff-login') {
       document.getElementById('tab-staff-login').classList.add('active');
       document.getElementById('staff-login-form').style.display = 'block';
-    } else if (tab === 'staff-signup') {
-      document.getElementById('tab-staff-signup').classList.add('active');
-      document.getElementById('staff-signup-form').style.display = 'block';
     }
   }
 
@@ -207,53 +182,6 @@
   }
 
   // --- CRYPTO AUTHENTICATION (PASSWORDLESS) ---
-
-  async function handleStaffSignup(e) {
-      e.preventDefault();
-      clearMessages();
-      const btn = document.getElementById('btn-staff-register');
-      btn.disabled = true;
-      btn.innerText = 'Generating Keys...';
-
-      const role = document.getElementById('signup-role').value;
-      const name = document.getElementById('staff-signup-name').value;
-      const email = document.getElementById('staff-signup-email').value;
-
-      try {
-          // 1. Browser generates KeyPair (Private Key stays in IndexedDB)
-          const publicKeyPem = await generateKeyPair(email);
-
-          // 2. Send Public Key to Backend via Role-specific route
-          const res = await fetch(`${API_BASE}/auth/crypto/${role}/register`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                  name,
-                  email,
-                  publicKey: publicKeyPem,
-                  deviceName: navigator.userAgent
-              })
-          });
-
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error || 'Registration failed');
-
-          document.getElementById('success-msg').innerText = data.message; 
-          
-          setTimeout(() => {
-              switchTab('staff-login');
-              document.getElementById('login-role').value = role;
-              document.getElementById('staff-login-email').value = email;
-          }, 2000);
-
-      } catch (err) {
-          document.getElementById('error-msg').innerText = err.message;
-      } finally {
-          btn.disabled = false;
-          btn.innerText = 'Generate Key & Register';
-      }
-  }
-
   async function handleStaffLogin(e) {
       e.preventDefault();
       clearMessages();
@@ -272,7 +200,25 @@
               body: JSON.stringify({ email })
           });
           const challengeData = await challengeRes.json();
-          if (!challengeRes.ok) throw new Error(challengeData.error || 'Failed to get challenge');
+          if (!challengeRes.ok) {
+              if (challengeData.requiresSetup) {
+                  // AUTO-SETUP DEVICE
+                  document.getElementById('error-msg').innerText = "First-time login detected. Setting up secure key...";
+                  const publicKeyPem = await generateKeyPair(email);
+                  
+                  const registerRes = await fetch(`${API_BASE}/auth/crypto/${role}/register`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ email, publicKey: publicKeyPem, deviceName: navigator.userAgent })
+                  });
+                  const registerData = await registerRes.json();
+                  if (!registerRes.ok) throw new Error(registerData.error || 'Device setup failed');
+                  
+                  document.getElementById('success-msg').innerText = "Device securely registered! Please click Authenticate Securely again to log in.";
+                  return;
+              }
+              throw new Error(challengeData.error || 'Failed to get challenge');
+          }
 
           // 2. Browser signs the challenge using Private Key from IndexedDB
           let cryptoPayload;

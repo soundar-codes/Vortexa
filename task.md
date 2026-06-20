@@ -1,13 +1,13 @@
 # Tasks
 
 - [x] 1. Backend Updates (`server.js`)
-  - [x] Remove `access_requests` check in `GET /api/records/patient/:patient_id` for doctors.
-  - [x] Separate crypto registration route into `/api/auth/crypto/doctor/register` and `/admin/register`.
-  - [x] Separate challenge route into `/api/auth/crypto/doctor/challenge` and `/admin/challenge`.
-  - [x] Separate verify route into `/api/auth/crypto/doctor/verify` and `/admin/verify`.
+  - [x] Auto-seed `admin@gmail.com` on server startup.
+  - [x] Add `POST /api/admin/create-doctor` endpoint for Admin to insert doctors.
+  - [x] Update `/api/auth/crypto/:role/challenge` to return `requiresSetup: true` if `public_key` is NULL.
+  - [x] Update `/api/auth/crypto/:role/register` to `UPDATE` an existing user's `public_key` instead of inserting a new user.
 - [x] 2. Login Frontend (`login.html`)
-  - [x] Replace "Staff" tabs with "Doctor Login/Signup" and "Admin Login/Signup" tabs.
-  - [x] Update frontend fetch calls to hit role-specific routes.
+  - [x] Remove Staff Signup tab and HTML form.
+  - [x] Update `handleStaffLogin` to catch `requiresSetup`, generate key pair, and call register automatically.
 - [x] 3. Dashboard Frontend (`index.html`)
-  - [x] In `renderPatientList()`, remove `pending` status logic and always show `View Vault` button.
-- [x] 4. Verification
+  - [x] Add UI to Admin Dashboard for creating a new Doctor account.
+  - [x] Add JS function to submit the form to the backend.
