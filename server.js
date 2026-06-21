@@ -63,15 +63,6 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Serve static files only for non-API routes
-app.use((req, res, next) => {
-  if (req.path.startsWith('/api')) {
-    next();
-  } else {
-    express.static(__dirname)(req, res, next);
-  }
-});
-
 // Debug logging
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
@@ -83,20 +74,9 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Server is running', timestamp: new Date().toISOString() });
 });
 
-// Test environment variables endpoint
-app.get('/test-env', (req, res) => {
-  res.json({
-    hasProjectId: !!process.env.FIREBASE_PROJECT_ID,
-    hasClientEmail: !!process.env.FIREBASE_CLIENT_EMAIL,
-    hasPrivateKey: !!process.env.FIREBASE_PRIVATE_KEY,
-    hasJwtSecret: !!process.env.JWT_SECRET,
-    projectId: process.env.FIREBASE_PROJECT_ID ? '***' + process.env.FIREBASE_PROJECT_ID.slice(-4) : 'missing'
-  });
-});
-
-// Simple test endpoint without Firebase
-app.post('/api/test', (req, res) => {
-  res.json({ message: 'API endpoint working', body: req.body });
+// API Routes - All API routes should be defined here
+app.get('/api', (req, res) => {
+  res.json({ message: 'API is working', endpoints: ['/api/auth/login', '/api/users/patients', '/api/access/request'] });
 });
 
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_medguardian_key';
@@ -622,19 +602,26 @@ app.delete('/api/admin/delete-doctor/:id', authenticate, requireDB, async (req, 
 //  SERVER START + ADMIN SEED
 // ═════════════════════════════════════════════════════════════════════════════
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-    console.log(`Server running on port ${PORT}`);
-    if (!db) return;
-    try {
-        const adminSnap = await db.collection('users').where('email', '==', 'admin@gmail.com').limit(1).get();
-        if (adminSnap.empty) {
-            await db.collection('users').add({
-                name: 'Admin', email: 'admin@gmail.com', role: 'admin',
-                created_at: admin.firestore.FieldValue.serverTimestamp(),
-            });
-            console.log('[Firebase] Seeded admin account: admin@gmail.com');
+
+// Only start server if not running in test environment
+if (require.main === module) {
+    app.listen(PORT, async () => {
+        console.log(`Server running on port ${PORT}`);
+        if (!db) return;
+        try {
+            const adminSnap = await db.collection('users').where('email', '==', 'admin@gmail.com').limit(1).get();
+            if (adminSnap.empty) {
+                await db.collection('users').add({
+                    name: 'Admin', email: 'admin@gmail.com', role: 'admin',
+                    created_at: admin.firestore.FieldValue.serverTimestamp(),
+                });
+                console.log('[Firebase] Seeded admin account: admin@gmail.com');
+            }
+        } catch (e) {
+            console.error('[Firebase] Failed to seed admin:', e.message);
         }
-    } catch (e) {
-        console.error('[Firebase] Failed to seed admin:', e.message);
-    }
-});
+    });
+}
+
+// Export app for testing
+module.exports = app;
